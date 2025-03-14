@@ -1,0 +1,3 @@
+* CloudWX Raspberry Pi
+
+Connect to radio, listen to AWOS/ASOS transmissions, convert speech to text, parse relevant weather data.
