@@ -1,5 +1,6 @@
 .projectile
 .DS_Store
+*.bin
 *.log
 *.pro.user*
 doc/html/

@@ -12,11 +12,28 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS ON)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(SRC_DIR ${CMAKE_SOURCE_DIR}/src)
+set(DEPS_DIR ${CMAKE_SOURCE_DIR}/deps)
+set(WHISPER_INCLUDE_DIR ${DEPS_DIR}/whisper.cpp/include)
+
+add_subdirectory(${DEPS_DIR}/whisper.cpp)
 
 # Set the src files for the project
 file(GLOB SRC_FILES
-  "${SRC_DIR}/*.cpp")
+  "${SRC_DIR}/*.cpp"
+  "${SRC_DIR}/*.c")
 
 add_executable(${TARGET_NAME} ${SRC_FILES})
 
-# target_link_libraries(${TARGET_NAME} lib1 lib2 ... libn)
+target_include_directories(${TARGET_NAME} PRIVATE
+  ${WHISPER_INCLUDE_DIR})
+
+target_link_libraries(${TARGET_NAME}
+  whisper)
+
+add_custom_command(
+  TARGET ${TARGET_NAME} POST_BUILD
+  COMMAND cmake -E copy_directory ${CMAKE_SOURCE_DIR}/models ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/models)
+add_custom_command(
+  TARGET ${TARGET_NAME} POST_BUILD
+  COMMAND cmake -E copy_directory ${CMAKE_SOURCE_DIR}/sample_audio ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/sample_audio)
+

@@ -1,7 +1,6 @@
-#include <stdio.h>
+#include "cli_example.h"
 
-int main()
+int main(int argc, char **argv)
 {
-    printf("Project template!");
-    return 0;
+    cli_example_main(argc, argv);
 }

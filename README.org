@@ -1,3 +1,31 @@
 * CloudWX Raspberry Pi
 
 Connect to radio, listen to AWOS/ASOS transmissions, convert speech to text, parse relevant weather data.
+
+** To build on raspberry pi
+#+begin_src bash
+git clone https://github.com/dprandle/cloudwx-remote.git
+git submodule init && git submodule update
+mkdir build && cd build
+cmake ..
+cmake --build . -- -j
+#+end_src
+
+The executable file is called cloudwx and is generated to build/bin.
+
+
+** Run sample audio
+To convert the sample audio using the base english model (assuming your current directory is the top level of the project)
+
+#+begin_src bash
+$ build/bin/cloudwx -m models/ggml-base.en.bin -f sample_audio/jfk.mp3
+#+end_src
+
+You can download more models with the download-ggml-model.sh script in the models folder. See whisper.cpp repo for options for that script. After downloading another model, configure again with:
+
+#+begin_src bash
+cd build
+cmake ..
+#+end_src
+
+This will copy the model to the build/bin/models folder.
