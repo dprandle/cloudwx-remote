@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.11.0)
 
 project(cloudwx)
 
+message("Compiling for architecture ${CMAKE_HOST_SYSTEM_PROCESSOR}")
+
 # These have the option to be different since you might want a version attached to the target name but not the app.
 # There may be more than a single app/target per project - so we by default set them to the cloudwx we can easily change that later.
 set(TARGET_NAME cloudwx)
@@ -29,6 +31,10 @@ target_include_directories(${TARGET_NAME} PRIVATE
 
 target_link_libraries(${TARGET_NAME}
   whisper)
+
+if (${CMAKE_HOST_SYSTEM_PROCESSOR} STREQUAL "aarch64")
+  target_compile_options(${TARGET_NAME} PRIVATE -march=armv8-a+fp+simd)
+endif()
 
 add_custom_command(
   TARGET ${TARGET_NAME} POST_BUILD
