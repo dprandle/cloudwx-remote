@@ -3,15 +3,17 @@
 #include <cstdio>
 #include <cstdint>
 
-#define tlog(...) nslib::lprint(nslib::GLOBAL_LOGGER, nslib::LOG_TRACE, __FILE__, __func__, __LINE__, __VA_ARGS__)
-#define dlog(...) nslib::lprint(nslib::GLOBAL_LOGGER, nslib::LOG_DEBUG, __FILE__, __func__, __LINE__, __VA_ARGS__)
-#define ilog(...) nslib::lprint(nslib::GLOBAL_LOGGER, nslib::LOG_INFO, __FILE__, __func__, __LINE__, __VA_ARGS__)
-#define wlog(...) nslib::lprint(nslib::GLOBAL_LOGGER, nslib::LOG_WARN, __FILE__, __func__, __LINE__, __VA_ARGS__)
-#define elog(...) nslib::lprint(nslib::GLOBAL_LOGGER, nslib::LOG_ERROR, __FILE__, __func__, __LINE__, __VA_ARGS__)
-#define flog(...) nslib::lprint(nslib::GLOBAL_LOGGER, nslib::LOG_FATAL, __FILE__, __func__, __LINE__, __VA_ARGS__)
+#define log_at_level(level, append_nl, ...) nslib::lprint(nslib::GLOBAL_LOGGER, level, __FILE__, __func__, __LINE__, append_nl, __VA_ARGS__)
+#define tlog(...) log_at_level(nslib::LOG_TRACE, true, __VA_ARGS__)
+#define dlog(...) log_at_level(nslib::LOG_DEBUG, true, __VA_ARGS__)
+#define ilog(...) log_at_level(nslib::LOG_INFO, true, __VA_ARGS__)
+#define wlog(...) log_at_level(nslib::LOG_WARN, true, __VA_ARGS__)
+#define elog(...) log_at_level(nslib::LOG_ERROR, true, __VA_ARGS__)
+#define flog(...) log_at_level(nslib::LOG_FATAL, true, __VA_ARGS__)
 
 struct tm;
-namespace nslib {
+namespace nslib
+{
 struct logging_ctxt;
 
 extern logging_ctxt *GLOBAL_LOGGER;
@@ -27,6 +29,7 @@ struct log_event
     int line;
     int level;
     uint64_t thread_id;
+    bool append_nl;
 };
 
 using logging_cbfn = void(log_event *ev);
@@ -64,6 +67,7 @@ int logging_level(logging_ctxt *logger);
 void set_quiet_logging(logging_ctxt *logger, bool enable);
 int add_logging_fp(logging_ctxt *logger, FILE *fp, int level);
 int add_logging_callback(logging_ctxt *logger, const logging_cb_data &cb_data);
-void lprint(logging_ctxt *logger, int level, const char *file, const char *func, int line, const char *fmt, ...);
+void lprint(logging_ctxt *logger, int level, const char *file, const char *func, int line, bool append_newline, const char *fmt, ...);
+
 
 } // namespace nslib

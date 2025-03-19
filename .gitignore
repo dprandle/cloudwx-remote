@@ -21,3 +21,4 @@ CMakeLists.txt.user*
 .dir-locals.el
 .emacs
 nohup.out
+deps
