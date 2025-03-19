@@ -140,7 +140,7 @@ void lprint(logging_ctxt *logger, int level, const char *file, const char *func,
     log_event ev{};
     lock(logger);
     if (!logger->quiet && level >= logger->level) {
-        ev = {.fmt = fmt, .file = path_basename(file), .func = func, .line = line, .level = level, .thread_id = (u64)pthread_self()};
+        ev = log_event {.fmt = fmt, .file = path_basename(file), .func = func, .line = line, .level = level, .thread_id = (u64)pthread_self()};
         init_event(&ev, stdout);
         va_start(ev.ap, fmt);
         stdout_callback(&ev);
