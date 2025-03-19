@@ -89,6 +89,7 @@ intern bool init_audio(miniaudio_ctxt *ma)
         ma_log_uninit(&ma->lg);
         return false;
     }
+    ilog("Selected audio backend: %s", ma_get_backend_name(ma->ctxt.backend));
 
     ma_device_info *dev_infos;
     ma_uint32 dev_cnt;
@@ -104,7 +105,15 @@ intern bool init_audio(miniaudio_ctxt *ma)
     // Loop over each device info and do something with it. Here we just print the name with their index. You may want
     // to give the user the opportunity to choose which device they'd prefer.
     for (i32 devi = 0; devi < dev_cnt; devi += 1) {
-        ilog("%d - %s", devi, dev_infos[devi].name);
+        if (ma->ctxt.backend == ma_backend_pulseaudio) {
+            ilog("%d - %s - pa devid: %s", devi, dev_infos[devi].name, dev_infos[devi].id.pulse);
+        }
+        else if (ma->ctxt.backend == ma_backend_alsa) {
+            ilog("%d - %s - pa devid: %s", devi, dev_infos[devi].name, dev_infos[devi].id.alsa);
+        }
+        else {
+            ilog("%d - %s", devi, dev_infos[devi].name);
+        }
     }
 
     // ma_device_config config = ma_device_config_init(ma_device_type_playback);
@@ -122,9 +131,18 @@ intern bool init_audio(miniaudio_ctxt *ma)
     return true;
 }
 
+void whisper_log_callback(enum ggml_log_level level, const char *text, void *user_data)
+{
+    if (level >= GGML_LOG_LEVEL_DEBUG && level <= GGML_LOG_LEVEL_CONT) {
+        log_at_level((int)level, false, text);
+    }
+}
+
 intern bool init_whisper(cloudwx_ctxt *ctxt)
 {
     ilog("Initializing whisper");
+    whisper_log_set(whisper_log_callback, nullptr);
+
     whisper_context_params cparams = whisper_context_default_params();
     ctxt->whisper = whisper_init_from_file_with_params("models/ggml-tiny.en.bin", cparams);
     if (!ctxt->whisper) {
@@ -148,6 +166,9 @@ bool init_cloudwx(cloudwx_ctxt *ctxt)
     if (fp) {
         add_logging_fp(GLOBAL_LOGGER, fp, LOG_TRACE);
     }
+#if defined(NDEBUG)
+    set_logging_level(GLOBAL_LOGGER, LOG_INFO);
+#endif
     ctxt->ma = new miniaudio_ctxt{};
     if (!init_audio(ctxt->ma)) {
         delete ctxt->ma;
