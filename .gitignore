@@ -3,6 +3,7 @@
 *.bin
 *.log
 *.pro.user*
+deps/
 doc/html/
 .open.swp
 .vscode/
