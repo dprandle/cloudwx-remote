@@ -102,32 +102,46 @@ intern bool init_audio(miniaudio_ctxt *ma)
         return false;
     }
 
-    // Loop over each device info and do something with it. Here we just print the name with their index. You may want
-    // to give the user the opportunity to choose which device they'd prefer.
+    // Print out each device info and save the index of the USB device associated with what we want
+    i32 our_dev_ind{-1};
     for (i32 devi = 0; devi < dev_cnt; devi += 1) {
-        if (ma->ctxt.backend == ma_backend_pulseaudio) {
-            ilog("%d - %s - pa devid: %s", devi, dev_infos[devi].name, dev_infos[devi].id.pulse);
+        if (ma->ctxt.backend == ma_backend_alsa) {
+            ilog("%d: %s : %s", devi, dev_infos[devi].name, dev_infos[devi].id.alsa);
+            if (strstr(dev_infos[devi].name, "USB")) {
+                our_dev_ind = devi;
+            }
         }
-        else if (ma->ctxt.backend == ma_backend_alsa) {
-            ilog("%d - %s - pa devid: %s", devi, dev_infos[devi].name, dev_infos[devi].id.alsa);
+        else if (ma->ctxt.backend == ma_backend_pulseaudio) {
+            ilog("%d: %s : %s", devi, dev_infos[devi].name, dev_infos[devi].id.pulse);
+        }
+        else if (ma->ctxt.backend == ma_backend_jack) {
+            ilog("%d: %s : %d", devi, dev_infos[devi].name, dev_infos[devi].id.jack);
         }
         else {
             ilog("%d - %s", devi, dev_infos[devi].name);
         }
     }
+    if (our_dev_ind != -1) {
+        ma_device_config config = ma_device_config_init(ma_device_type_capture);
+        config.playback.pDeviceID = &dev_infos[chosenPlaybackDeviceIndex].id;
+        config.playback.format    = MY_FORMAT;
+        config.playback.channels  = MY_CHANNEL_COUNT;
+        config.sampleRate         = MY_SAMPLE_RATE;
+        config.dataCallback       = data_callback;
+        config.pUserData          = pMyCustomData;
 
-    // ma_device_config config = ma_device_config_init(ma_device_type_playback);
-    // config.playback.pDeviceID = &dev_infos[chosenPlaybackDeviceIndex].id;
-    // config.playback.format    = MY_FORMAT;
-    // config.playback.channels  = MY_CHANNEL_COUNT;
-    // config.sampleRate         = MY_SAMPLE_RATE;
-    // config.dataCallback       = data_callback;
-    // config.pUserData          = pMyCustomData;
+        ma_device device;
+        if (ma_device_init(&context, &config, &device) != MA_SUCCESS) {
+            // Error
+        }
+        
+    }
+    else {
+        wlog("Could not find USB audio device");
+        terminate_audio(ma);
+        return false;
+    }
 
-    // ma_device device;
-    // if (ma_device_init(&context, &config, &device) != MA_SUCCESS) {
-    //     // Error
-    // }
     return true;
 }
 
