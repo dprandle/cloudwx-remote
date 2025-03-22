@@ -1,8 +1,11 @@
+#include <malloc.h>
 #include <cstring>
 #include <cerrno>
+#include <atomic>
 #include <sys/stat.h>
 
 #include "cloudwx.h"
+#include "cli_example.h"
 #include "miniaudio.h"
 #include "whisper.h"
 #include "logging.h"
@@ -11,10 +14,29 @@
 
 using namespace nslib;
 
+// Amount of bytes we want to process at a time in whisper - 1024 frames come in at a time with 1 sample per frame and
+// the sample rate is 16kHz, so we get 16k samples per second. We want to process 10 seconds worth of audio at a time.
+intern constexpr sizet AUDIO_CHUNK_SAMPLE_COUNT = 1024 * 16 * 10;
+intern constexpr sizet AUDIO_BUFFER_SAMPLE_COUNT = AUDIO_CHUNK_SAMPLE_COUNT * 10;
+
+struct ring_buffer
+{
+    // Shared buffer in both threads - big enough it shouldnt ever matter
+    f32 *buffer;
+    // Data available for processing - incremented by sound thread and decremented by processing thread
+    std::atomic_size_t available;
+    // Used by sound thread only
+    size_t write_pos;
+    // Used by processing thread only
+    size_t read_pos;
+};
+
 struct miniaudio_ctxt
 {
     ma_log lg;
     ma_context ctxt;
+    ma_device dev;
+    ring_buffer data;
 };
 
 intern FILE *open_logging_file()
@@ -66,26 +88,78 @@ intern void on_ma_log(void *, u32 level, const char *msg)
 intern void terminate_audio(miniaudio_ctxt *ma)
 {
     ilog("Terminating audio");
+    ma_device_uninit(&ma->dev);
+    free(ma->data.buffer);
     ma_context_uninit(&ma->ctxt);
     ma_log_uninit(&ma->lg);
-    *ma = {};
+}
+
+intern void audio_callback(ma_device *dev, void *output, const void *input, u32 frames)
+{
+    auto ma = (miniaudio_ctxt *)dev->pUserData;
+    // Frames are same as sample count since we have mono audio
+    u32 samples = frames * 1;
+    sizet byte_cnt = samples * sizeof(f32);
+    auto buffer_start = ma->data.buffer + ma->data.write_pos;
+    memcpy(buffer_start, input, byte_cnt);
+    ma->data.write_pos += samples;
+
+    if ((ma->data.write_pos % AUDIO_CHUNK_SAMPLE_COUNT) == 0) {
+        std::atomic_fetch_add(&ma->data.available, AUDIO_CHUNK_SAMPLE_COUNT); // update available frames
+    }
+
+    assert(ma->data.write_pos <= AUDIO_BUFFER_SAMPLE_COUNT);
+    if (ma->data.write_pos == AUDIO_BUFFER_SAMPLE_COUNT) {
+        ma->data.write_pos = 0; // wrap around
+    }
+}
+
+void process_available_audio(miniaudio_ctxt *ma, whisper_ctxt *whisper)
+{
+    if (std::atomic_load(&ma->data.available) < AUDIO_CHUNK_SAMPLE_COUNT) {
+        return; // not enough data available
+    }
+
+    whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
+    wparams.n_threads = 4;
+    auto buffer_start = ma->data.buffer + ma->data.read_pos;
+    tlog("Processing %u samples starting at offset %u", AUDIO_CHUNK_SAMPLE_COUNT, ma->data.read_pos);
+    whisper_full(whisper, wparams, buffer_start, AUDIO_CHUNK_SAMPLE_COUNT);
+
+    std::string tot_txt;
+    const int n_segments = whisper_full_n_segments(whisper);
+    for (int i = 0; i < n_segments; ++i) {
+        const char *text = whisper_full_get_segment_text(whisper, i);
+        tot_txt += text;
+    }
+    ilog("Chunk Text\n%s", tot_txt.c_str());
+
+    ma->data.read_pos += AUDIO_CHUNK_SAMPLE_COUNT;
+    assert(ma->data.read_pos <= AUDIO_BUFFER_SAMPLE_COUNT);
+    if (ma->data.read_pos == AUDIO_BUFFER_SAMPLE_COUNT) {
+        ma->data.read_pos = 0;
+    }
+    std::atomic_fetch_sub(&ma->data.available, AUDIO_CHUNK_SAMPLE_COUNT); // update available frames
 }
 
 intern bool init_audio(miniaudio_ctxt *ma)
 {
     ilog("Initializing audio");
-    int result = ma_log_init(nullptr, &ma->lg);
+    ma_result result = ma_log_init(nullptr, &ma->lg);
+    if (result != MA_SUCCESS) {
+        wlog("Failed to initialize log: %s", ma_result_description(result));
+        return false;
+    }
     ma_log_callback cb{};
     cb.onLog = on_ma_log;
     ma_log_register_callback(&ma->lg, cb);
 
     ma_context_config ccfg{};
     ccfg.pLog = &ma->lg;
-    ccfg.threadPriority = ma_thread_priority_realtime;
 
     result = ma_context_init(NULL, 0, &ccfg, &ma->ctxt);
     if (result != MA_SUCCESS) {
-        wlog("Could not initialize audio context - err code: %d", result);
+        wlog("Could not initialize audio context - err: %s", ma_result_description(result));
         ma_log_uninit(&ma->lg);
         return false;
     }
@@ -97,7 +171,7 @@ intern bool init_audio(miniaudio_ctxt *ma)
     u32 capture_dev_cnt;
     result = ma_context_get_devices(&ma->ctxt, &dev_infos, &dev_cnt, &capture_infos, &capture_dev_cnt);
     if (result != MA_SUCCESS) {
-        wlog("Could not list audio devices - err code: %d", result);
+        wlog("Could not list audio devices: %s", ma_result_description(result));
         terminate_audio(ma);
         return false;
     }
@@ -123,18 +197,19 @@ intern bool init_audio(miniaudio_ctxt *ma)
     }
     if (our_dev_ind != -1) {
         ma_device_config config = ma_device_config_init(ma_device_type_capture);
-        config.playback.pDeviceID = &dev_infos[chosenPlaybackDeviceIndex].id;
-        config.playback.format    = MY_FORMAT;
-        config.playback.channels  = MY_CHANNEL_COUNT;
-        config.sampleRate         = MY_SAMPLE_RATE;
-        config.dataCallback       = data_callback;
-        config.pUserData          = pMyCustomData;
+        config.capture.pDeviceID = &dev_infos[our_dev_ind].id;
+        config.capture.format = ma_format_f32;
+        config.capture.channels = 1;
+        config.sampleRate = 16000;
+        config.dataCallback = audio_callback;
+        config.pUserData = ma;
 
-        ma_device device;
-        if (ma_device_init(&context, &config, &device) != MA_SUCCESS) {
-            // Error
+        ma_result result = ma_device_init(&ma->ctxt, &config, &ma->dev);
+        if (result != MA_SUCCESS) {
+            wlog("Could not initialize audio device %s: %s", dev_infos[our_dev_ind].name, ma_result_description(result));
+            terminate_audio(ma);
+            return false;
         }
-        
     }
     else {
         wlog("Could not find USB audio device");
@@ -142,6 +217,7 @@ intern bool init_audio(miniaudio_ctxt *ma)
         return false;
     }
 
+    ma->data.buffer = (f32 *)malloc(AUDIO_BUFFER_SAMPLE_COUNT * sizeof(f32));
     return true;
 }
 
@@ -182,6 +258,8 @@ bool init_cloudwx(cloudwx_ctxt *ctxt)
     }
 #if defined(NDEBUG)
     set_logging_level(GLOBAL_LOGGER, LOG_INFO);
+#else
+    set_logging_level(GLOBAL_LOGGER, LOG_DEBUG);
 #endif
     ctxt->ma = new miniaudio_ctxt{};
     if (!init_audio(ctxt->ma)) {
@@ -193,12 +271,14 @@ bool init_cloudwx(cloudwx_ctxt *ctxt)
         delete ctxt->ma;
         return false;
     }
+    ma_device_start(&ctxt->ma->dev);
     return true;
 }
 
 void terminate_cloudwx(cloudwx_ctxt *ctxt)
 {
     ilog("Terminating cloudwx");
+    ma_device_stop(&ctxt->ma->dev);
     terminate_whisper(ctxt);
     terminate_audio(ctxt->ma);
     ctxt->ma = nullptr;

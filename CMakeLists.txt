@@ -30,6 +30,7 @@ target_include_directories(${TARGET_NAME} PRIVATE
   ${WHISPER_INCLUDE_DIR})
 
 target_link_libraries(${TARGET_NAME}
+  pthread
   whisper)
 
 if (${CMAKE_HOST_SYSTEM_PROCESSOR} STREQUAL "aarch64")

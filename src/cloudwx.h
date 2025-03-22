@@ -12,3 +12,5 @@ struct cloudwx_ctxt
 
 bool init_cloudwx(cloudwx_ctxt *ctxt);
 void terminate_cloudwx(cloudwx_ctxt *ctxt);
+void process_available_audio(miniaudio_ctxt *ma, whisper_ctxt *whisper);
+

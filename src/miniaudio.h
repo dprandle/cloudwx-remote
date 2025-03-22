@@ -42372,7 +42372,7 @@ MA_API ma_result ma_device_init(ma_context* pContext, const ma_device_config* pC
     } else {
         /* Not using a fixed sized data callback so no need for an intermediary buffer. */
     }
-
+    
 
     /* Some backends don't require the worker thread. */
     if (!ma_context_is_backend_asynchronous(pContext)) {
