@@ -16,7 +16,7 @@ using namespace nslib;
 
 // Amount of bytes we want to process at a time in whisper - 1024 frames come in at a time with 1 sample per frame and
 // the sample rate is 16kHz, so we get 16k samples per second. We want to process 10 seconds worth of audio at a time.
-intern constexpr sizet AUDIO_CHUNK_SAMPLE_COUNT = 1024 * 16 * 10;
+intern constexpr sizet AUDIO_CHUNK_SAMPLE_COUNT = 1024 * 16 * 30;
 intern constexpr sizet AUDIO_BUFFER_SAMPLE_COUNT = AUDIO_CHUNK_SAMPLE_COUNT * 10;
 
 struct ring_buffer
@@ -94,15 +94,32 @@ intern void terminate_audio(miniaudio_ctxt *ma)
     ma_log_uninit(&ma->lg);
 }
 
-intern void audio_callback(ma_device *dev, void *output, const void *input, u32 frames)
+intern void audio_callback(ma_device *dev, void *output, const void *input, u32 frame_count)
 {
     auto ma = (miniaudio_ctxt *)dev->pUserData;
     // Frames are same as sample count since we have mono audio
-    u32 samples = frames * 1;
-    sizet byte_cnt = samples * sizeof(f32);
+    u32 sample_count = frame_count * 1;
+    static int silent_frames = 0;
+    sizet byte_cnt = sample_count * sizeof(f32);
     auto buffer_start = ma->data.buffer + ma->data.write_pos;
-    memcpy(buffer_start, input, byte_cnt);
-    ma->data.write_pos += samples;
+    u32 silence_count = 0;
+    const float *input_f = (const float*)input;
+    for (int i = 0; i < sample_count; ++i) {
+        if (std::abs(input_f[i]) < 0.005f) {
+            ++silence_count;
+        }
+        buffer_start[i] = input_f[i];
+    }
+    if (silence_count == sample_count) {
+        ++silent_frames;
+        ilog("%d silent frames", silent_frames);
+    }
+    else {
+        silent_frames = 0;
+    }
+    //memcpy(buffer_start, input, byte_cnt);
+    //ilog("Silent samples %d", silence_count);
+    ma->data.write_pos += sample_count;
 
     if ((ma->data.write_pos % AUDIO_CHUNK_SAMPLE_COUNT) == 0) {
         std::atomic_fetch_add(&ma->data.available, AUDIO_CHUNK_SAMPLE_COUNT); // update available frames
@@ -120,8 +137,8 @@ void process_available_audio(miniaudio_ctxt *ma, whisper_ctxt *whisper)
         return; // not enough data available
     }
 
-    whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
-    wparams.n_threads = 4;
+    whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_BEAM_SEARCH);
+    wparams.n_threads = 10;
     auto buffer_start = ma->data.buffer + ma->data.read_pos;
     tlog("Processing %u samples starting at offset %u", AUDIO_CHUNK_SAMPLE_COUNT, ma->data.read_pos);
     whisper_full(whisper, wparams, buffer_start, AUDIO_CHUNK_SAMPLE_COUNT);
