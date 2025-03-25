@@ -1,11 +1,11 @@
 #include <malloc.h>
 #include <cstring>
 #include <cerrno>
+#include <cmath>
 #include <atomic>
 #include <sys/stat.h>
 
 #include "cloudwx.h"
-#include "cli_example.h"
 #include "miniaudio.h"
 #include "whisper.h"
 #include "logging.h"
@@ -16,19 +16,34 @@ using namespace nslib;
 
 // Amount of bytes we want to process at a time in whisper - 1024 frames come in at a time with 1 sample per frame and
 // the sample rate is 16kHz, so we get 16k samples per second. We want to process 10 seconds worth of audio at a time.
-intern constexpr sizet AUDIO_CHUNK_SAMPLE_COUNT = 1024 * 16 * 30;
-intern constexpr sizet AUDIO_BUFFER_SAMPLE_COUNT = AUDIO_CHUNK_SAMPLE_COUNT * 10;
+intern constexpr sizet AUDIO_MAX_CHUNK_SAMPLE_COUNT = 1024 * 16 * 30;
+intern constexpr sizet AUDIO_BUFFER_SAMPLE_COUNT = AUDIO_MAX_CHUNK_SAMPLE_COUNT * 10;
 
-struct ring_buffer
+// Each window of audio passed to the callback will be 200ms
+intern constexpr u32 AUDIO_CALLBACK_FRAME_COUNT = AUDIO_SAMPLE_RATE / 5;
+
+struct proc_thread_audio_data
+{
+    size_t read_pos;
+};
+
+struct snd_thread_audio_data
+{
+    size_t write_pos;
+    size_t silent_sample_cnt{};
+    size_t buffered_sample_cnt{};
+};
+
+struct audio_buffer
 {
     // Shared buffer in both threads - big enough it shouldnt ever matter
     f32 *buffer;
     // Data available for processing - incremented by sound thread and decremented by processing thread
     std::atomic_size_t available;
-    // Used by sound thread only
-    size_t write_pos;
     // Used by processing thread only
-    size_t read_pos;
+    proc_thread_audio_data proc_data;
+    // Used by the sound thread only
+    snd_thread_audio_data snd_data;
 };
 
 struct miniaudio_ctxt
@@ -36,7 +51,13 @@ struct miniaudio_ctxt
     ma_log lg;
     ma_context ctxt;
     ma_device dev;
-    ring_buffer data;
+    audio_buffer data;
+};
+
+struct whisper_ctxt
+{
+    whisper_context *ctxt;
+    f32 *buffer;
 };
 
 intern FILE *open_logging_file()
@@ -97,66 +118,59 @@ intern void terminate_audio(miniaudio_ctxt *ma)
 intern void audio_callback(ma_device *dev, void *output, const void *input, u32 frame_count)
 {
     auto ma = (miniaudio_ctxt *)dev->pUserData;
+
     // Frames are same as sample count since we have mono audio
     u32 sample_count = frame_count * 1;
-    static int silent_frames = 0;
-    sizet byte_cnt = sample_count * sizeof(f32);
-    auto buffer_start = ma->data.buffer + ma->data.write_pos;
-    u32 silence_count = 0;
-    const float *input_f = (const float*)input;
+    //sizet byte_cnt = sample_count * sizeof(f32);
+    auto buffer_start = ma->data.buffer + ma->data.snd_data.write_pos;
+    const float *input_f = (const float *)input;
+
+    float sample_rms{};
     for (int i = 0; i < sample_count; ++i) {
-        if (std::abs(input_f[i]) < 0.005f) {
-            ++silence_count;
-        }
+        sample_rms += input_f[i] * input_f[i];
         buffer_start[i] = input_f[i];
     }
-    if (silence_count == sample_count) {
-        ++silent_frames;
-        ilog("%d silent frames", silent_frames);
-    }
-    else {
-        silent_frames = 0;
-    }
-    //memcpy(buffer_start, input, byte_cnt);
-    //ilog("Silent samples %d", silence_count);
-    ma->data.write_pos += sample_count;
+    sample_rms = sqrt(sample_rms / sample_count);
 
-    if ((ma->data.write_pos % AUDIO_CHUNK_SAMPLE_COUNT) == 0) {
-        std::atomic_fetch_add(&ma->data.available, AUDIO_CHUNK_SAMPLE_COUNT); // update available frames
-    }
+    // memcpy(buffer_start, input, byte_cnt);
+    // ilog("Silent samples %d", silence_count);
+    ma->data.snd_data.write_pos += sample_count;
 
-    assert(ma->data.write_pos <= AUDIO_BUFFER_SAMPLE_COUNT);
-    if (ma->data.write_pos == AUDIO_BUFFER_SAMPLE_COUNT) {
-        ma->data.write_pos = 0; // wrap around
-    }
+    // if ((ma->data.write_pos % AUDIO_MAX_CHUNK_SAMPLE_COUNT) == 0) {
+    //     std::atomic_fetch_add(&ma->data.available, AUDIO_MAX_CHUNK_SAMPLE_COUNT); // update available frames
+    // }
+
+    // assert(ma->data.write_pos <= AUDIO_BUFFER_SAMPLE_COUNT);
+    // if (ma->data.write_pos == AUDIO_BUFFER_SAMPLE_COUNT) {
+    //     ma->data.write_pos = 0; // wrap around
+    // }
 }
 
 void process_available_audio(miniaudio_ctxt *ma, whisper_ctxt *whisper)
 {
-    if (std::atomic_load(&ma->data.available) < AUDIO_CHUNK_SAMPLE_COUNT) {
-        return; // not enough data available
-    }
+    size_t avail = std::atomic_load(&ma->data.available);
+    if (avail > 0) {
+        whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_BEAM_SEARCH);
+        wparams.n_threads = 10;
+        auto buffer_start = ma->data.buffer + ma->data.read_pos;
+        tlog("Processing %u samples starting at offset %u", AUDIO_MAX_CHUNK_SAMPLE_COUNT, ma->data.read_pos);
+        whisper_full(whisper->ctxt, wparams, buffer_start, AUDIO_MAX_CHUNK_SAMPLE_COUNT);
 
-    whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_BEAM_SEARCH);
-    wparams.n_threads = 10;
-    auto buffer_start = ma->data.buffer + ma->data.read_pos;
-    tlog("Processing %u samples starting at offset %u", AUDIO_CHUNK_SAMPLE_COUNT, ma->data.read_pos);
-    whisper_full(whisper, wparams, buffer_start, AUDIO_CHUNK_SAMPLE_COUNT);
+        char tot_txt[512];
+        tot_txt[0] = 0;
+        const int n_segments = whisper_full_n_segments(whisper->ctxt);
+        for (int i = 0; i < n_segments; ++i) {
+            const char *text = whisper_full_get_segment_text(whisper->ctxt, i);
+            strcat(tot_txt, text);
+        }
+        ilog("Chunk Text\n%s", tot_txt);
 
-    std::string tot_txt;
-    const int n_segments = whisper_full_n_segments(whisper);
-    for (int i = 0; i < n_segments; ++i) {
-        const char *text = whisper_full_get_segment_text(whisper, i);
-        tot_txt += text;
+        ma->data.read_pos += avail;
+        if (ma->data.read_pos == AUDIO_BUFFER_SAMPLE_COUNT) {
+            ma->data.read_pos = 0;
+        }
+        std::atomic_fetch_sub(&ma->data.available, AUDIO_MAX_CHUNK_SAMPLE_COUNT); // update available frames
     }
-    ilog("Chunk Text\n%s", tot_txt.c_str());
-
-    ma->data.read_pos += AUDIO_CHUNK_SAMPLE_COUNT;
-    assert(ma->data.read_pos <= AUDIO_BUFFER_SAMPLE_COUNT);
-    if (ma->data.read_pos == AUDIO_BUFFER_SAMPLE_COUNT) {
-        ma->data.read_pos = 0;
-    }
-    std::atomic_fetch_sub(&ma->data.available, AUDIO_CHUNK_SAMPLE_COUNT); // update available frames
 }
 
 intern bool init_audio(miniaudio_ctxt *ma)
@@ -217,7 +231,8 @@ intern bool init_audio(miniaudio_ctxt *ma)
         config.capture.pDeviceID = &dev_infos[our_dev_ind].id;
         config.capture.format = ma_format_f32;
         config.capture.channels = 1;
-        config.sampleRate = 16000;
+        config.sampleRate = AUDIO_SAMPLE_RATE;
+        config.periodSizeInFrames = AUDIO_CALLBACK_FRAME_COUNT;
         config.dataCallback = audio_callback;
         config.pUserData = ma;
 
@@ -251,18 +266,20 @@ intern bool init_whisper(cloudwx_ctxt *ctxt)
     whisper_log_set(whisper_log_callback, nullptr);
 
     whisper_context_params cparams = whisper_context_default_params();
-    ctxt->whisper = whisper_init_from_file_with_params("models/ggml-tiny.en.bin", cparams);
+    ctxt->whisper->ctxt = whisper_init_from_file_with_params(WHISPER_MODEL_FILE, cparams);
     if (!ctxt->whisper) {
         wlog("Failed to initialize whisper context");
         return false;
     }
+    ctxt->whisper->buffer = (f32 *)malloc(AUDIO_MAX_CHUNK_SAMPLE_COUNT * sizeof(f32));
     return true;
 }
 
 intern void terminate_whisper(cloudwx_ctxt *ctxt)
 {
     ilog("Terminating whisper");
-    whisper_free(ctxt->whisper);
+    free(ctxt->whisper->buffer);
+    whisper_free(ctxt->whisper->ctxt);
     ctxt->whisper = nullptr;
 }
 
@@ -283,9 +300,11 @@ bool init_cloudwx(cloudwx_ctxt *ctxt)
         delete ctxt->ma;
         return false;
     }
+    ctxt->whisper = new whisper_ctxt{};
     if (!init_whisper(ctxt)) {
         terminate_audio(ctxt->ma);
         delete ctxt->ma;
+        delete ctxt->whisper;
         return false;
     }
     ma_device_start(&ctxt->ma->dev);
@@ -297,6 +316,8 @@ void terminate_cloudwx(cloudwx_ctxt *ctxt)
     ilog("Terminating cloudwx");
     ma_device_stop(&ctxt->ma->dev);
     terminate_whisper(ctxt);
+    delete ctxt->whisper;
     terminate_audio(ctxt->ma);
+    delete ctxt->ma;
     ctxt->ma = nullptr;
 }

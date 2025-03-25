@@ -2,7 +2,11 @@
 
 struct miniaudio_ctxt;
 struct whisper_context;
-using whisper_ctxt = whisper_context;
+struct whisper_ctxt;
+
+inline constexpr int AUDIO_SAMPLE_RATE = 16000;
+inline constexpr float SILENT_THRESHOLD = 0.005f;
+inline constexpr const char *WHISPER_MODEL_FILE = "models/ggml-tiny.en.bin";
 
 struct cloudwx_ctxt
 {
