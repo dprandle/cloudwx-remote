@@ -9,18 +9,15 @@
 #include "miniaudio.h"
 #include "whisper.h"
 #include "logging.h"
-#include "basic_types.h"
 #include "utils.h"
 
-using namespace nslib;
-
-// Amount of bytes we want to process at a time in whisper - 1024 frames come in at a time with 1 sample per frame and
-// the sample rate is 16kHz, so we get 16k samples per second. We want to process 10 seconds worth of audio at a time.
-intern constexpr sizet AUDIO_MAX_CHUNK_SAMPLE_COUNT = 1024 * 16 * 30;
-intern constexpr sizet AUDIO_BUFFER_SAMPLE_COUNT = AUDIO_MAX_CHUNK_SAMPLE_COUNT * 10;
-
-// Each window of audio passed to the callback will be 200ms
-intern constexpr u32 AUDIO_CALLBACK_FRAME_COUNT = AUDIO_SAMPLE_RATE / 5;
+intern constexpr sizet WHISPER_MAX_AUDIO_CHUNK_COUNT = (1000 / AUDIO_CHUNK_SIZE_MS) * WHISPER_MAX_AUDIO_CHUNK_SIZE_S;
+intern constexpr u32 AUDIO_CB_CHUNK_FRAME_COUNT = (AUDIO_SAMPLE_RATE * AUDIO_CHUNK_SIZE_MS) / 1000;
+intern constexpr u32 AUDIO_CB_CHUNK_SAMPLE_COUNT = AUDIO_CB_CHUNK_FRAME_COUNT * AUDIO_CHANNEL_COUNT;
+// Triple buffer the audio
+intern constexpr sizet AUDIO_BUFFER_SAMPLE_COUNT = AUDIO_SAMPLE_RATE * WHISPER_MAX_AUDIO_CHUNK_SIZE_S * 3;
+intern constexpr sizet CONSECUTIVE_SILENT_AUDIO_CHUNK_THRESHOLD = (CONSECUTIVE_SILENT_AUDIO_THRESHOLD_MS / AUDIO_CHUNK_SIZE_MS); // two
+                                                                                                                                 // seconds
 
 struct proc_thread_audio_data
 {
@@ -30,8 +27,9 @@ struct proc_thread_audio_data
 struct snd_thread_audio_data
 {
     size_t write_pos;
-    size_t silent_sample_cnt{};
-    size_t buffered_sample_cnt{};
+    size_t consecutive_silent_chunks{};
+    bool recording;
+    i32 buffered_chunk_cnt{};
 };
 
 struct audio_buffer
@@ -115,46 +113,113 @@ intern void terminate_audio(miniaudio_ctxt *ma)
     ma_log_uninit(&ma->lg);
 }
 
+intern void stop_recording(snd_thread_audio_data *snd_data)
+{
+    dlog("Recording stop at write pos %u with %u available chunks", snd_data->write_pos, snd_data->buffered_chunk_cnt);
+    snd_data->recording = false;
+}
+
 intern void audio_callback(ma_device *dev, void *output, const void *input, u32 frame_count)
 {
     auto ma = (miniaudio_ctxt *)dev->pUserData;
 
     // Frames are same as sample count since we have mono audio
-    u32 sample_count = frame_count * 1;
-    //sizet byte_cnt = sample_count * sizeof(f32);
-    auto buffer_start = ma->data.buffer + ma->data.snd_data.write_pos;
+    u32 sample_count = frame_count * AUDIO_CHANNEL_COUNT;
     const float *input_f = (const float *)input;
 
+    // Calculate our chunk RMS
     float sample_rms{};
     for (int i = 0; i < sample_count; ++i) {
         sample_rms += input_f[i] * input_f[i];
-        buffer_start[i] = input_f[i];
     }
     sample_rms = sqrt(sample_rms / sample_count);
+    //dlog("sample_rms: %.4f", sample_rms);
 
-    // memcpy(buffer_start, input, byte_cnt);
-    // ilog("Silent samples %d", silence_count);
-    ma->data.snd_data.write_pos += sample_count;
+    bool update_avail{false};
+    if (sample_rms < AUDIO_SILENT_THRESHOLD_RMS) {
+        ++ma->data.snd_data.consecutive_silent_chunks;
+        //dlog("Increased silence count to %d", ma->data.snd_data.consecutive_silent_chunks);
+        assert(ma->data.snd_data.consecutive_silent_chunks <= CONSECUTIVE_SILENT_AUDIO_CHUNK_THRESHOLD);
+        if (ma->data.snd_data.consecutive_silent_chunks == CONSECUTIVE_SILENT_AUDIO_CHUNK_THRESHOLD) {
+            ma->data.snd_data.consecutive_silent_chunks = 0;
+            if (ma->data.snd_data.recording) {
+                stop_recording(&ma->data.snd_data);
+                dlog("Stopped due to silence");
+                update_avail = true;
+            }
+        }
+    }
+    else {
+        ma->data.snd_data.consecutive_silent_chunks = 0;
+        if (!ma->data.snd_data.recording) {
+            dlog("Recording start at write pos %u with %u available chunks", ma->data.snd_data.buffered_chunk_cnt);
+            ma->data.snd_data.recording = true;
+        }
+    }
 
-    // if ((ma->data.write_pos % AUDIO_MAX_CHUNK_SAMPLE_COUNT) == 0) {
-    //     std::atomic_fetch_add(&ma->data.available, AUDIO_MAX_CHUNK_SAMPLE_COUNT); // update available frames
-    // }
+    if (ma->data.snd_data.recording) {
+        auto write_buffer = ma->data.buffer + ma->data.snd_data.write_pos;
+        size_t in_buf_cpy_offset{};
+        size_t new_pos = ma->data.snd_data.write_pos + sample_count;
+        if (new_pos >= AUDIO_BUFFER_SAMPLE_COUNT) {
+            auto in_buf_cpy_offset = (AUDIO_BUFFER_SAMPLE_COUNT - ma->data.snd_data.write_pos);
+            memcpy(write_buffer, input, in_buf_cpy_offset * sizeof(f32));
+            write_buffer = ma->data.buffer;
+            new_pos -= AUDIO_BUFFER_SAMPLE_COUNT;
+        }
+        else if (new_pos == AUDIO_BUFFER_SAMPLE_COUNT) {
+            new_pos = 0;
+        }
+        memcpy(write_buffer, input_f + in_buf_cpy_offset, (sample_count - in_buf_cpy_offset) * sizeof(f32));
+        ++ma->data.snd_data.buffered_chunk_cnt;
+        ma->data.snd_data.write_pos = new_pos;
+        // dlog("Recorded chunk resulting in write pos %u", ma->data.snd_data.buffered_chunk_cnt);
+        assert(ma->data.snd_data.buffered_chunk_cnt <= WHISPER_MAX_AUDIO_CHUNK_COUNT);
+        if (ma->data.snd_data.buffered_chunk_cnt == WHISPER_MAX_AUDIO_CHUNK_COUNT) {
+            stop_recording(&ma->data.snd_data);
+            dlog("Stopped due to threshold");
+            update_avail = true;
+        }
+    }
 
-    // assert(ma->data.write_pos <= AUDIO_BUFFER_SAMPLE_COUNT);
-    // if (ma->data.write_pos == AUDIO_BUFFER_SAMPLE_COUNT) {
-    //     ma->data.write_pos = 0; // wrap around
-    // }
+    if (update_avail) {
+        std::atomic_fetch_add(&ma->data.available, ma->data.snd_data.buffered_chunk_cnt);
+        dlog("Updating available chunk count to %u", ma->data.snd_data.buffered_chunk_cnt);
+        ma->data.snd_data.buffered_chunk_cnt = 0;
+    }
 }
 
 void process_available_audio(miniaudio_ctxt *ma, whisper_ctxt *whisper)
 {
-    size_t avail = std::atomic_load(&ma->data.available);
-    if (avail > 0) {
-        whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_BEAM_SEARCH);
-        wparams.n_threads = 10;
-        auto buffer_start = ma->data.buffer + ma->data.read_pos;
-        tlog("Processing %u samples starting at offset %u", AUDIO_MAX_CHUNK_SAMPLE_COUNT, ma->data.read_pos);
-        whisper_full(whisper->ctxt, wparams, buffer_start, AUDIO_MAX_CHUNK_SAMPLE_COUNT);
+    size_t avail_chunks = std::atomic_load(&ma->data.available);
+    if (avail_chunks > 0) {
+        // Copy data to our own buffer
+        size_t sample_count = avail_chunks * AUDIO_CB_CHUNK_SAMPLE_COUNT;
+
+        auto read_buffer = ma->data.buffer + ma->data.proc_data.read_pos;
+        size_t buf_cpy_offset{};
+        size_t new_pos = ma->data.proc_data.read_pos + sample_count;
+        if (new_pos > AUDIO_BUFFER_SAMPLE_COUNT) {
+            auto buf_cpy_offset = (AUDIO_BUFFER_SAMPLE_COUNT - ma->data.proc_data.read_pos);
+            ilog("Copying %u samples from audio (%u offset) to whisper buffer", buf_cpy_offset, ma->data.proc_data.read_pos);
+            memcpy(whisper->buffer, read_buffer, buf_cpy_offset * sizeof(f32));
+            read_buffer = ma->data.buffer;
+            new_pos -= AUDIO_BUFFER_SAMPLE_COUNT;
+        }
+        else if (new_pos == AUDIO_BUFFER_SAMPLE_COUNT) {
+            new_pos = 0;
+        }
+        ilog("Copying %u samples from audio (%u read_pos) to whisper buffer (offset %u)",
+             (sample_count - buf_cpy_offset),
+             ma->data.proc_data.read_pos,
+             buf_cpy_offset);
+        memcpy(whisper->buffer + buf_cpy_offset, read_buffer, (sample_count - buf_cpy_offset) * sizeof(f32));
+        ma->data.proc_data.read_pos = new_pos;
+
+        whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
+        wparams.n_threads = 8;
+
+        whisper_full(whisper->ctxt, wparams, whisper->buffer, sample_count);
 
         char tot_txt[512];
         tot_txt[0] = 0;
@@ -163,13 +228,9 @@ void process_available_audio(miniaudio_ctxt *ma, whisper_ctxt *whisper)
             const char *text = whisper_full_get_segment_text(whisper->ctxt, i);
             strcat(tot_txt, text);
         }
-        ilog("Chunk Text\n%s", tot_txt);
+        ilog(" ----  Chunk Text ---  \n%s\n\n", tot_txt);
 
-        ma->data.read_pos += avail;
-        if (ma->data.read_pos == AUDIO_BUFFER_SAMPLE_COUNT) {
-            ma->data.read_pos = 0;
-        }
-        std::atomic_fetch_sub(&ma->data.available, AUDIO_MAX_CHUNK_SAMPLE_COUNT); // update available frames
+        std::atomic_fetch_sub(&ma->data.available, avail_chunks); // update available frames
     }
 }
 
@@ -230,9 +291,9 @@ intern bool init_audio(miniaudio_ctxt *ma)
         ma_device_config config = ma_device_config_init(ma_device_type_capture);
         config.capture.pDeviceID = &dev_infos[our_dev_ind].id;
         config.capture.format = ma_format_f32;
-        config.capture.channels = 1;
+        config.capture.channels = AUDIO_CHANNEL_COUNT;
         config.sampleRate = AUDIO_SAMPLE_RATE;
-        config.periodSizeInFrames = AUDIO_CALLBACK_FRAME_COUNT;
+        config.periodSizeInFrames = AUDIO_CB_CHUNK_FRAME_COUNT;
         config.dataCallback = audio_callback;
         config.pUserData = ma;
 
@@ -248,8 +309,9 @@ intern bool init_audio(miniaudio_ctxt *ma)
         terminate_audio(ma);
         return false;
     }
-
-    ma->data.buffer = (f32 *)malloc(AUDIO_BUFFER_SAMPLE_COUNT * sizeof(f32));
+    sizet buf_sz = AUDIO_BUFFER_SAMPLE_COUNT * sizeof(f32);
+    ilog("Allocating %u byte buffer for audio recording", buf_sz);
+    ma->data.buffer = (f32 *)malloc(buf_sz);
     return true;
 }
 
@@ -271,7 +333,9 @@ intern bool init_whisper(cloudwx_ctxt *ctxt)
         wlog("Failed to initialize whisper context");
         return false;
     }
-    ctxt->whisper->buffer = (f32 *)malloc(AUDIO_MAX_CHUNK_SAMPLE_COUNT * sizeof(f32));
+    sizet buf_sz = WHISPER_MAX_AUDIO_CHUNK_COUNT * AUDIO_CB_CHUNK_SAMPLE_COUNT * sizeof(f32);
+    ilog("Allocating %u byte buffer for whisper audio", buf_sz);
+    ctxt->whisper->buffer = (f32 *)malloc(buf_sz);
     return true;
 }
 
