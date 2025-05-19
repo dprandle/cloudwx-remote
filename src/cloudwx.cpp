@@ -29,7 +29,7 @@ struct snd_thread_audio_data
     size_t write_pos;
     size_t consecutive_silent_chunks{};
     bool recording;
-    i32 buffered_chunk_cnt{};
+    s32 buffered_chunk_cnt{};
 };
 
 struct audio_buffer
@@ -269,8 +269,8 @@ intern bool init_audio(miniaudio_ctxt *ma)
     }
 
     // Print out each device info and save the index of the USB device associated with what we want
-    i32 our_dev_ind{-1};
-    for (i32 devi = 0; devi < dev_cnt; devi += 1) {
+    s32 our_dev_ind{-1};
+    for (s32 devi = 0; devi < dev_cnt; devi += 1) {
         if (ma->ctxt.backend == ma_backend_alsa) {
             ilog("%d: %s : %s", devi, dev_infos[devi].name, dev_infos[devi].id.alsa);
             if (strstr(dev_infos[devi].name, "USB")) {
