@@ -15,9 +15,6 @@ set(CMAKE_CXX_EXTENSIONS ON)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(SRC_DIR ${CMAKE_SOURCE_DIR}/src)
 set(DEPS_DIR ${CMAKE_SOURCE_DIR}/deps)
-set(WHISPER_INCLUDE_DIR ${DEPS_DIR}/whisper.cpp/include)
-
-add_subdirectory(${DEPS_DIR}/whisper.cpp)
 
 # Set the src files for the project
 file(GLOB SRC_FILES

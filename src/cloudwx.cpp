@@ -133,12 +133,11 @@ intern void audio_callback(ma_device *dev, void *output, const void *input, u32 
         sample_rms += input_f[i] * input_f[i];
     }
     sample_rms = sqrt(sample_rms / sample_count);
-    //dlog("sample_rms: %.4f", sample_rms);
 
     bool update_avail{false};
     if (sample_rms < AUDIO_SILENT_THRESHOLD_RMS) {
         ++ma->data.snd_data.consecutive_silent_chunks;
-        //dlog("Increased silence count to %d", ma->data.snd_data.consecutive_silent_chunks);
+        // dlog("Increased silence count to %d", ma->data.snd_data.consecutive_silent_chunks);
         assert(ma->data.snd_data.consecutive_silent_chunks <= CONSECUTIVE_SILENT_AUDIO_CHUNK_THRESHOLD);
         if (ma->data.snd_data.consecutive_silent_chunks == CONSECUTIVE_SILENT_AUDIO_CHUNK_THRESHOLD) {
             ma->data.snd_data.consecutive_silent_chunks = 0;
@@ -183,55 +182,62 @@ intern void audio_callback(ma_device *dev, void *output, const void *input, u32 
     }
 
     if (update_avail) {
-        std::atomic_fetch_add(&ma->data.available, ma->data.snd_data.buffered_chunk_cnt);
-        dlog("Updating available chunk count to %u", ma->data.snd_data.buffered_chunk_cnt);
+        auto res = std::atomic_fetch_add(&ma->data.available, ma->data.snd_data.buffered_chunk_cnt);
+        std::atomic_notify_one(&ma->data.available);
+        dlog("Updating available chunk count from %lu to %lu", res, res + ma->data.snd_data.buffered_chunk_cnt);
         ma->data.snd_data.buffered_chunk_cnt = 0;
     }
 }
 
 void process_available_audio(miniaudio_ctxt *ma, whisper_ctxt *whisper)
 {
+    std::atomic_wait(&ma->data.available, 0);
     size_t avail_chunks = std::atomic_load(&ma->data.available);
-    if (avail_chunks > 0) {
-        // Copy data to our own buffer
-        size_t sample_count = avail_chunks * AUDIO_CB_CHUNK_SAMPLE_COUNT;
+    asrt(avail_chunks > 0);
+    // Copy data to our own buffer
+    size_t sample_count = avail_chunks * AUDIO_CB_CHUNK_SAMPLE_COUNT;
 
-        auto read_buffer = ma->data.buffer + ma->data.proc_data.read_pos;
-        size_t buf_cpy_offset{};
-        size_t new_pos = ma->data.proc_data.read_pos + sample_count;
-        if (new_pos > AUDIO_BUFFER_SAMPLE_COUNT) {
-            auto buf_cpy_offset = (AUDIO_BUFFER_SAMPLE_COUNT - ma->data.proc_data.read_pos);
-            ilog("Copying %u samples from audio (%u offset) to whisper buffer", buf_cpy_offset, ma->data.proc_data.read_pos);
-            memcpy(whisper->buffer, read_buffer, buf_cpy_offset * sizeof(f32));
-            read_buffer = ma->data.buffer;
-            new_pos -= AUDIO_BUFFER_SAMPLE_COUNT;
-        }
-        else if (new_pos == AUDIO_BUFFER_SAMPLE_COUNT) {
-            new_pos = 0;
-        }
-        ilog("Copying %u samples from audio (%u read_pos) to whisper buffer (offset %u)",
-             (sample_count - buf_cpy_offset),
-             ma->data.proc_data.read_pos,
-             buf_cpy_offset);
-        memcpy(whisper->buffer + buf_cpy_offset, read_buffer, (sample_count - buf_cpy_offset) * sizeof(f32));
-        ma->data.proc_data.read_pos = new_pos;
-
-        whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
-        wparams.n_threads = 8;
-
-        whisper_full(whisper->ctxt, wparams, whisper->buffer, sample_count);
-
-        char tot_txt[512];
-        tot_txt[0] = 0;
-        const int n_segments = whisper_full_n_segments(whisper->ctxt);
-        for (int i = 0; i < n_segments; ++i) {
-            const char *text = whisper_full_get_segment_text(whisper->ctxt, i);
-            strcat(tot_txt, text);
-        }
-        ilog(" ----  Chunk Text ---  \n%s\n\n", tot_txt);
-
-        std::atomic_fetch_sub(&ma->data.available, avail_chunks); // update available frames
+    auto read_buffer = ma->data.buffer + ma->data.proc_data.read_pos;
+    size_t buf_cpy_offset{};
+    size_t new_pos = ma->data.proc_data.read_pos + sample_count;
+    if (new_pos > AUDIO_BUFFER_SAMPLE_COUNT) {
+        auto buf_cpy_offset = (AUDIO_BUFFER_SAMPLE_COUNT - ma->data.proc_data.read_pos);
+        ilog("Copying %u samples from audio (%u offset) to whisper buffer", buf_cpy_offset, ma->data.proc_data.read_pos);
+        memcpy(whisper->buffer, read_buffer, buf_cpy_offset * sizeof(f32));
+        read_buffer = ma->data.buffer;
+        new_pos -= AUDIO_BUFFER_SAMPLE_COUNT;
     }
+    else if (new_pos == AUDIO_BUFFER_SAMPLE_COUNT) {
+        new_pos = 0;
+    }
+    ilog("Copying %u samples from audio (%u read_pos) to whisper buffer (offset %u)",
+         (sample_count - buf_cpy_offset),
+         ma->data.proc_data.read_pos,
+         buf_cpy_offset);
+    memcpy(whisper->buffer + buf_cpy_offset, read_buffer, (sample_count - buf_cpy_offset) * sizeof(f32));
+    ma->data.proc_data.read_pos = new_pos;
+
+    whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
+    wparams.n_threads = 8;
+
+    whisper_full(whisper->ctxt, wparams, whisper->buffer, sample_count);
+
+    // Buffer should be big enough to hold our max whisper chunk size - x2 mutliplier to be sure
+    intern constexpr u32 CHAR_BUF_SZ = WHISPER_MAX_AUDIO_CHUNK_SIZE_S * APPROXIMATE_SPEECH_CHARS_PER_S * 2 + 1;
+    char tot_txt[CHAR_BUF_SZ];
+    tot_txt[0] = 0;
+    const int n_segments = whisper_full_n_segments(whisper->ctxt);
+    u32 buf_sz_remaining = CHAR_BUF_SZ - 1; // -1 for null terminator
+    for (int i = 0; i < n_segments; ++i) {
+        const char *text = whisper_full_get_segment_text(whisper->ctxt, i);
+        auto slen = strlen(text);
+        strncat(tot_txt, text, buf_sz_remaining);
+        dlog("Appending str of length %lu - %lu bytes remaining in str buf", slen, buf_sz_remaining - slen);
+        buf_sz_remaining -= slen;
+    }
+    ilog(" ----  Chunk Text ---  \n%s\n\n", tot_txt);
+    auto res = std::atomic_fetch_sub(&ma->data.available, avail_chunks); // update available frames
+    dlog("Updating available chunk count from %lu to %lu", res, res - avail_chunks);
 }
 
 intern bool init_audio(miniaudio_ctxt *ma)
@@ -273,7 +279,7 @@ intern bool init_audio(miniaudio_ctxt *ma)
     for (s32 devi = 0; devi < dev_cnt; devi += 1) {
         if (ma->ctxt.backend == ma_backend_alsa) {
             ilog("%d: %s : %s", devi, dev_infos[devi].name, dev_infos[devi].id.alsa);
-            if (strstr(dev_infos[devi].name, "USB")) {
+            if (strstr(dev_infos[devi].name, "USB Audio CODEC")) {
                 our_dev_ind = devi;
             }
         }
