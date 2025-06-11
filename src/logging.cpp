@@ -16,8 +16,6 @@
 #define PRINT_U64 "l"
 #endif
 
-namespace nslib
-{
 struct logging_ctxt
 {
     const char *name;
@@ -163,4 +161,4 @@ void lprint(logging_ctxt *logger, int level, const char *file, const char *func,
     }
     unlock(logger);
 }
-} // namespace nslib
+

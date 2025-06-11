@@ -30,8 +30,6 @@
     #define asrt_break(msg) assert(!msg)
 #endif
 
-namespace nslib
-{
 using s8 = int8_t;
 using u8 = uint8_t;
 using s16 = int16_t;
@@ -54,7 +52,10 @@ using cstr = const char *;
 const sizet KB_SIZE = 1024;
 const sizet MB_SIZE = 1024 * KB_SIZE;
 
-using small_str = char[SMALL_STR_LEN];
+struct small_str {
+    char data[SMALL_STR_LEN];
+    sizet size{};
+};
 
 inline constexpr const sizet INVALID_IND = ULONG_LONG_MAX;
 inline constexpr const u32 INVALID_ID = UINT_MAX;
@@ -67,5 +68,3 @@ inline bool is_valid(u32 v)
 {
     return (v != INVALID_ID);
 }
-
-} // namespace nslib

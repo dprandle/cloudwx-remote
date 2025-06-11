@@ -1,6 +1,8 @@
 #include <cstring>
 #include <cerrno>
+#include <cstdlib>
 #include <sys/stat.h>
+
 #include "utils.h"
 #include "logging.h"
 
@@ -39,4 +41,16 @@ int mkdir_p(const char *path, int mode)
         return -1;
     }
     return 0;
+}
+
+small_str generate_id()
+{
+    // Generate in this format 774f0899-9666471a-b1f9
+    small_str ret{};
+    u32 r1 = rand();
+    u32 r2 = rand();
+    u16 r3 = rand();
+    sprintf(ret.data, "%08x-%08x-%04x", r1, r2, r3);
+    ret.size = strnlen(ret.data, SMALL_STR_LEN);
+    return ret;
 }

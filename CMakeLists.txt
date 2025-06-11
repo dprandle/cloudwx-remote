@@ -14,7 +14,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS ON)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(SRC_DIR ${CMAKE_SOURCE_DIR}/src)
-set(DEPS_DIR ${CMAKE_SOURCE_DIR}/deps)
+
+add_subdirectory(deps)
 
 # Set the src files for the project
 file(GLOB SRC_FILES
@@ -23,10 +24,8 @@ file(GLOB SRC_FILES
 
 add_executable(${TARGET_NAME} ${SRC_FILES})
 
-target_include_directories(${TARGET_NAME} PRIVATE
-  ${WHISPER_INCLUDE_DIR})
-
 target_link_libraries(${TARGET_NAME}
+  mongoc_shared
   pthread
   whisper)
 

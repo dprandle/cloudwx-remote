@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 
 #include "cloudwx.h"
+#include "mongodb.h"
 #include "miniaudio.h"
 #include "whisper.h"
 #include "logging.h"
@@ -189,11 +190,25 @@ intern void audio_callback(ma_device *dev, void *output, const void *input, u32 
     }
 }
 
-void process_available_audio(miniaudio_ctxt *ma, whisper_ctxt *whisper)
+struct upload_audio_chunk_data
+{};
+
+void upload_audio_chunk_with_meta(void *arg)
+{
+    auto chunk_data = (upload_audio_chunk_data *)arg;
+    
+}
+
+void process_available_audio(miniaudio_ctxt *ma, work_queue *wq)
 {
     std::atomic_wait(&ma->data.available, 0);
     size_t avail_chunks = std::atomic_load(&ma->data.available);
     asrt(avail_chunks > 0);
+
+    auto chunk_data = (upload_audio_chunk_data *)calloc(1, sizeof(upload_audio_chunk_data));
+    enqueue_task(wq, {upload_audio_chunk_with_meta, chunk_data});
+
+#if 0        
     // Copy data to our own buffer
     size_t sample_count = avail_chunks * AUDIO_CB_CHUNK_SAMPLE_COUNT;
 
@@ -217,27 +232,30 @@ void process_available_audio(miniaudio_ctxt *ma, whisper_ctxt *whisper)
     memcpy(whisper->buffer + buf_cpy_offset, read_buffer, (sample_count - buf_cpy_offset) * sizeof(f32));
     ma->data.proc_data.read_pos = new_pos;
 
+    // If the other thread signals data available we are less likely to miss it doing this here
+    auto res = std::atomic_fetch_sub(&ma->data.available, avail_chunks); // update available frames
+    dlog("Updating available chunk count from %lu to %lu", res, res - avail_chunks);
+
     whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
     wparams.n_threads = 8;
 
     whisper_full(whisper->ctxt, wparams, whisper->buffer, sample_count);
 
     // Buffer should be big enough to hold our max whisper chunk size - x2 mutliplier to be sure
-    intern constexpr u32 CHAR_BUF_SZ = WHISPER_MAX_AUDIO_CHUNK_SIZE_S * APPROXIMATE_SPEECH_CHARS_PER_S * 2 + 1;
-    char tot_txt[CHAR_BUF_SZ];
-    tot_txt[0] = 0;
+    entry->id = generate_id();
+    entry->text[0] = 0;
+    
     const int n_segments = whisper_full_n_segments(whisper->ctxt);
-    u32 buf_sz_remaining = CHAR_BUF_SZ - 1; // -1 for null terminator
+    u32 buf_sz_remaining = sizeof(entry->text)-1;
     for (int i = 0; i < n_segments; ++i) {
         const char *text = whisper_full_get_segment_text(whisper->ctxt, i);
         auto slen = strlen(text);
-        strncat(tot_txt, text, buf_sz_remaining);
+        strncat(entry->text, text, buf_sz_remaining);
         dlog("Appending str of length %lu - %lu bytes remaining in str buf", slen, buf_sz_remaining - slen);
         buf_sz_remaining -= slen;
     }
-    ilog(" ----  Chunk Text ---  \n%s\n\n", tot_txt);
-    auto res = std::atomic_fetch_sub(&ma->data.available, avail_chunks); // update available frames
-    dlog("Updating available chunk count from %lu to %lu", res, res - avail_chunks);
+    ilog(" ----  Chunk Text ---  \n%s\n\n", entry->text);
+#endif
 }
 
 intern bool init_audio(miniaudio_ctxt *ma)
@@ -353,6 +371,24 @@ intern void terminate_whisper(cloudwx_ctxt *ctxt)
     ctxt->whisper = nullptr;
 }
 
+intern bool init_mongodb(cloudwx_ctxt *ctxt)
+{
+    mongodb_global_init();
+    ctxt->db = mongodb_create(URI_PROD_SERVER, DB_NAME);
+    if (!mongodb_init(ctxt->db)) {
+        mongodb_destroy(ctxt->db);
+        ctxt->db = nullptr;
+    }
+    return ctxt->db != nullptr;
+}
+
+intern void terminate_mongodb(cloudwx_ctxt *ctxt)
+{
+    mongodb_terminate(ctxt->db);
+    mongodb_destroy(ctxt->db);
+    mongodb_global_terminate();
+}
+
 bool init_cloudwx(cloudwx_ctxt *ctxt)
 {
     ilog("Initializing cloudwx");
@@ -365,6 +401,15 @@ bool init_cloudwx(cloudwx_ctxt *ctxt)
 #else
     set_logging_level(GLOBAL_LOGGER, LOG_DEBUG);
 #endif
+
+    init_work_queue(&ctxt->wq);
+
+    srand((u32)time(NULL));
+
+    if (!init_mongodb(ctxt)) {
+        return false;
+    }
+
     ctxt->ma = new miniaudio_ctxt{};
     if (!init_audio(ctxt->ma)) {
         delete ctxt->ma;
@@ -389,5 +434,6 @@ void terminate_cloudwx(cloudwx_ctxt *ctxt)
     delete ctxt->whisper;
     terminate_audio(ctxt->ma);
     delete ctxt->ma;
+    terminate_mongodb(ctxt);
     ctxt->ma = nullptr;
 }

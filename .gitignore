@@ -3,7 +3,6 @@
 *.bin
 *.log
 *.pro.user*
-deps/
 doc/html/
 .open.swp
 .vscode/
@@ -21,4 +20,3 @@ CMakeLists.txt.user*
 .dir-locals.el
 .emacs
 nohup.out
-deps

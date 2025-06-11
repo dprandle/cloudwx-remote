@@ -3,17 +3,15 @@
 #include <cstdio>
 #include <cstdint>
 
-#define log_at_level(level, append_nl, ...) nslib::lprint(nslib::GLOBAL_LOGGER, level, __FILE__, __func__, __LINE__, append_nl, __VA_ARGS__)
-#define tlog(...) log_at_level(nslib::LOG_TRACE, true, __VA_ARGS__)
-#define dlog(...) log_at_level(nslib::LOG_DEBUG, true, __VA_ARGS__)
-#define ilog(...) log_at_level(nslib::LOG_INFO, true, __VA_ARGS__)
-#define wlog(...) log_at_level(nslib::LOG_WARN, true, __VA_ARGS__)
-#define elog(...) log_at_level(nslib::LOG_ERROR, true, __VA_ARGS__)
-#define flog(...) log_at_level(nslib::LOG_FATAL, true, __VA_ARGS__)
+#define log_at_level(level, append_nl, ...) lprint(GLOBAL_LOGGER, level, __FILE__, __func__, __LINE__, append_nl, __VA_ARGS__)
+#define tlog(...) log_at_level(LOG_TRACE, true, __VA_ARGS__)
+#define dlog(...) log_at_level(LOG_DEBUG, true, __VA_ARGS__)
+#define ilog(...) log_at_level(LOG_INFO, true, __VA_ARGS__)
+#define wlog(...) log_at_level(LOG_WARN, true, __VA_ARGS__)
+#define elog(...) log_at_level(LOG_ERROR, true, __VA_ARGS__)
+#define flog(...) log_at_level(LOG_FATAL, true, __VA_ARGS__)
 
 struct tm;
-namespace nslib
-{
 struct logging_ctxt;
 
 extern logging_ctxt *GLOBAL_LOGGER;
@@ -69,5 +67,3 @@ int add_logging_fp(logging_ctxt *logger, FILE *fp, int level);
 int add_logging_callback(logging_ctxt *logger, const logging_cb_data &cb_data);
 void lprint(logging_ctxt *logger, int level, const char *file, const char *func, int line, bool append_newline, const char *fmt, ...);
 
-
-} // namespace nslib
