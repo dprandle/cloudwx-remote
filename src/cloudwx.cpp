@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 
 #include "cloudwx.h"
+#include "audio.h"
 #include "mongodb.h"
 #include "miniaudio.h"
 #include "whisper.h"
@@ -36,7 +37,7 @@ struct snd_thread_audio_data
 struct audio_buffer
 {
     // Shared buffer in both threads - big enough it shouldnt ever matter
-    f32 *buffer;
+    s16 *buffer;
     // Data available for processing - incremented by sound thread and decremented by processing thread
     std::atomic_size_t available;
     // Used by processing thread only
@@ -120,18 +121,21 @@ intern void stop_recording(snd_thread_audio_data *snd_data)
     snd_data->recording = false;
 }
 
+intern constexpr s16 MAX_S16 = std::numeric_limits<s16>::max();
+intern constexpr float SAMPLE_RMS_DENOM = MAX_S16 * MAX_S16;
+
 intern void audio_callback(ma_device *dev, void *output, const void *input, u32 frame_count)
 {
     auto ma = (miniaudio_ctxt *)dev->pUserData;
 
     // Frames are same as sample count since we have mono audio
     u32 sample_count = frame_count * AUDIO_CHANNEL_COUNT;
-    const float *input_f = (const float *)input;
+    const s16 *input_f = (const s16 *)input;
 
     // Calculate our chunk RMS
     float sample_rms{};
     for (int i = 0; i < sample_count; ++i) {
-        sample_rms += input_f[i] * input_f[i];
+        sample_rms += (input_f[i] * input_f[i] / SAMPLE_RMS_DENOM);
     }
     sample_rms = sqrt(sample_rms / sample_count);
 
@@ -163,14 +167,14 @@ intern void audio_callback(ma_device *dev, void *output, const void *input, u32 
         size_t new_pos = ma->data.snd_data.write_pos + sample_count;
         if (new_pos >= AUDIO_BUFFER_SAMPLE_COUNT) {
             auto in_buf_cpy_offset = (AUDIO_BUFFER_SAMPLE_COUNT - ma->data.snd_data.write_pos);
-            memcpy(write_buffer, input, in_buf_cpy_offset * sizeof(f32));
+            memcpy(write_buffer, input, in_buf_cpy_offset * sizeof(s16));
             write_buffer = ma->data.buffer;
             new_pos -= AUDIO_BUFFER_SAMPLE_COUNT;
         }
         else if (new_pos == AUDIO_BUFFER_SAMPLE_COUNT) {
             new_pos = 0;
         }
-        memcpy(write_buffer, input_f + in_buf_cpy_offset, (sample_count - in_buf_cpy_offset) * sizeof(f32));
+        memcpy(write_buffer, input_f + in_buf_cpy_offset, (sample_count - in_buf_cpy_offset) * sizeof(s16));
         ++ma->data.snd_data.buffered_chunk_cnt;
         ma->data.snd_data.write_pos = new_pos;
         // dlog("Recorded chunk resulting in write pos %u", ma->data.snd_data.buffered_chunk_cnt);
@@ -191,12 +195,21 @@ intern void audio_callback(ma_device *dev, void *output, const void *input, u32 
 }
 
 struct upload_audio_chunk_data
-{};
+{
+    s16 *pcm_data;
+    sizet sample_count;
+};
 
 void upload_audio_chunk_with_meta(void *arg)
 {
     auto chunk_data = (upload_audio_chunk_data *)arg;
-    
+    char fname[16]{};
+    static int chunks = 0;
+    sprintf(fname, "chunk_%d.wav", chunks++);
+    write_wav_to_file(fname, chunk_data->pcm_data, AUDIO_SAMPLE_RATE, AUDIO_CHANNEL_COUNT, chunk_data->sample_count);
+    ilog("Saving %lu sample audio chunk to %s", chunk_data->sample_count, fname);
+    free(chunk_data->pcm_data);
+    free(chunk_data);
 }
 
 void process_available_audio(miniaudio_ctxt *ma, work_queue *wq)
@@ -206,56 +219,39 @@ void process_available_audio(miniaudio_ctxt *ma, work_queue *wq)
     asrt(avail_chunks > 0);
 
     auto chunk_data = (upload_audio_chunk_data *)calloc(1, sizeof(upload_audio_chunk_data));
-    enqueue_task(wq, {upload_audio_chunk_with_meta, chunk_data});
+    chunk_data->sample_count = avail_chunks * AUDIO_CB_CHUNK_SAMPLE_COUNT;
+    chunk_data->pcm_data = (s16 *)calloc(1, chunk_data->sample_count * sizeof(s16));
 
-#if 0        
-    // Copy data to our own buffer
-    size_t sample_count = avail_chunks * AUDIO_CB_CHUNK_SAMPLE_COUNT;
-
-    auto read_buffer = ma->data.buffer + ma->data.proc_data.read_pos;
-    size_t buf_cpy_offset{};
-    size_t new_pos = ma->data.proc_data.read_pos + sample_count;
-    if (new_pos > AUDIO_BUFFER_SAMPLE_COUNT) {
-        auto buf_cpy_offset = (AUDIO_BUFFER_SAMPLE_COUNT - ma->data.proc_data.read_pos);
-        ilog("Copying %u samples from audio (%u offset) to whisper buffer", buf_cpy_offset, ma->data.proc_data.read_pos);
-        memcpy(whisper->buffer, read_buffer, buf_cpy_offset * sizeof(f32));
-        read_buffer = ma->data.buffer;
-        new_pos -= AUDIO_BUFFER_SAMPLE_COUNT;
+    // Get the end position of the read buffer - if its past the end of the audio circular buffer (>
+    // AUDIO_BUFFER_SAMPLE_COUNT) then we copy the chunk at the end of the buffer first, then copy the chunk from the
+    // start of the buffer to the recalculated end pos..
+    size_t read_buf_end_pos = ma->data.proc_data.read_pos + chunk_data->sample_count;
+    auto dest_buf = chunk_data->pcm_data;    
+    if (read_buf_end_pos > AUDIO_BUFFER_SAMPLE_COUNT) {
+        // Copy the end chunk of the audio buffer
+        auto read_buf_partial_sz = (AUDIO_BUFFER_SAMPLE_COUNT - ma->data.proc_data.read_pos);
+        ilog("Copying %u samples from audio (%u offset) to pcm buffer", read_buf_partial_sz, ma->data.proc_data.read_pos);
+        memcpy(chunk_data->pcm_data, ma->data.buffer + ma->data.proc_data.read_pos, read_buf_partial_sz * sizeof(s16));
+        
+        // Now set the read pos to the start of the cirular buffer, and recalculate the end pos. We also adjust the dest
+        // buffer to account for the samples we just wrote to it
+        ma->data.proc_data.read_pos = 0;
+        read_buf_end_pos -= AUDIO_BUFFER_SAMPLE_COUNT;
+        dest_buf += read_buf_partial_sz;
     }
-    else if (new_pos == AUDIO_BUFFER_SAMPLE_COUNT) {
-        new_pos = 0;
-    }
-    ilog("Copying %u samples from audio (%u read_pos) to whisper buffer (offset %u)",
-         (sample_count - buf_cpy_offset),
+    ilog("Copying %u samples from audio (%u read_pos) to pcm buffer (offset %u)",
+         (read_buf_end_pos - ma->data.proc_data.read_pos),
          ma->data.proc_data.read_pos,
-         buf_cpy_offset);
-    memcpy(whisper->buffer + buf_cpy_offset, read_buffer, (sample_count - buf_cpy_offset) * sizeof(f32));
-    ma->data.proc_data.read_pos = new_pos;
+         dest_buf - chunk_data->pcm_data);
+    memcpy(dest_buf, ma->data.buffer + ma->data.proc_data.read_pos, (read_buf_end_pos - ma->data.proc_data.read_pos) * sizeof(s16));
+    // If read_buf_end_pos is AUDIO_BUFFER_SAMPLE_COUNT, it will be correctly handled on the next set of samples.. the first
+    // partial memcpy would just copy 0 bytes as read_buf_partial_sz would calculate to 0
+    ma->data.proc_data.read_pos = read_buf_end_pos;
 
-    // If the other thread signals data available we are less likely to miss it doing this here
     auto res = std::atomic_fetch_sub(&ma->data.available, avail_chunks); // update available frames
-    dlog("Updating available chunk count from %lu to %lu", res, res - avail_chunks);
-
-    whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
-    wparams.n_threads = 8;
-
-    whisper_full(whisper->ctxt, wparams, whisper->buffer, sample_count);
-
-    // Buffer should be big enough to hold our max whisper chunk size - x2 mutliplier to be sure
-    entry->id = generate_id();
-    entry->text[0] = 0;
+    ilog("Updating available chunk count from %lu to %lu", res, res - avail_chunks);
     
-    const int n_segments = whisper_full_n_segments(whisper->ctxt);
-    u32 buf_sz_remaining = sizeof(entry->text)-1;
-    for (int i = 0; i < n_segments; ++i) {
-        const char *text = whisper_full_get_segment_text(whisper->ctxt, i);
-        auto slen = strlen(text);
-        strncat(entry->text, text, buf_sz_remaining);
-        dlog("Appending str of length %lu - %lu bytes remaining in str buf", slen, buf_sz_remaining - slen);
-        buf_sz_remaining -= slen;
-    }
-    ilog(" ----  Chunk Text ---  \n%s\n\n", entry->text);
-#endif
+    enqueue_task(wq, {upload_audio_chunk_with_meta, chunk_data});
 }
 
 intern bool init_audio(miniaudio_ctxt *ma)
@@ -314,7 +310,7 @@ intern bool init_audio(miniaudio_ctxt *ma)
     if (our_dev_ind != -1) {
         ma_device_config config = ma_device_config_init(ma_device_type_capture);
         config.capture.pDeviceID = &dev_infos[our_dev_ind].id;
-        config.capture.format = ma_format_f32;
+        config.capture.format = ma_format_s16;
         config.capture.channels = AUDIO_CHANNEL_COUNT;
         config.sampleRate = AUDIO_SAMPLE_RATE;
         config.periodSizeInFrames = AUDIO_CB_CHUNK_FRAME_COUNT;
@@ -333,9 +329,9 @@ intern bool init_audio(miniaudio_ctxt *ma)
         terminate_audio(ma);
         return false;
     }
-    sizet buf_sz = AUDIO_BUFFER_SAMPLE_COUNT * sizeof(f32);
+    sizet buf_sz = AUDIO_BUFFER_SAMPLE_COUNT * sizeof(s16);
     ilog("Allocating %u byte buffer for audio recording", buf_sz);
-    ma->data.buffer = (f32 *)malloc(buf_sz);
+    ma->data.buffer = (s16 *)malloc(buf_sz);
     return true;
 }
 
@@ -344,31 +340,6 @@ void whisper_log_callback(enum ggml_log_level level, const char *text, void *use
     if (level >= GGML_LOG_LEVEL_DEBUG && level <= GGML_LOG_LEVEL_CONT) {
         log_at_level((int)level, false, text);
     }
-}
-
-intern bool init_whisper(cloudwx_ctxt *ctxt)
-{
-    ilog("Initializing whisper");
-    whisper_log_set(whisper_log_callback, nullptr);
-
-    whisper_context_params cparams = whisper_context_default_params();
-    ctxt->whisper->ctxt = whisper_init_from_file_with_params(WHISPER_MODEL_FILE, cparams);
-    if (!ctxt->whisper) {
-        wlog("Failed to initialize whisper context");
-        return false;
-    }
-    sizet buf_sz = WHISPER_MAX_AUDIO_CHUNK_COUNT * AUDIO_CB_CHUNK_SAMPLE_COUNT * sizeof(f32);
-    ilog("Allocating %u byte buffer for whisper audio", buf_sz);
-    ctxt->whisper->buffer = (f32 *)malloc(buf_sz);
-    return true;
-}
-
-intern void terminate_whisper(cloudwx_ctxt *ctxt)
-{
-    ilog("Terminating whisper");
-    free(ctxt->whisper->buffer);
-    whisper_free(ctxt->whisper->ctxt);
-    ctxt->whisper = nullptr;
 }
 
 intern bool init_mongodb(cloudwx_ctxt *ctxt)
@@ -415,13 +386,7 @@ bool init_cloudwx(cloudwx_ctxt *ctxt)
         delete ctxt->ma;
         return false;
     }
-    ctxt->whisper = new whisper_ctxt{};
-    if (!init_whisper(ctxt)) {
-        terminate_audio(ctxt->ma);
-        delete ctxt->ma;
-        delete ctxt->whisper;
-        return false;
-    }
+
     ma_device_start(&ctxt->ma->dev);
     return true;
 }
@@ -430,8 +395,6 @@ void terminate_cloudwx(cloudwx_ctxt *ctxt)
 {
     ilog("Terminating cloudwx");
     ma_device_stop(&ctxt->ma->dev);
-    terminate_whisper(ctxt);
-    delete ctxt->whisper;
     terminate_audio(ctxt->ma);
     delete ctxt->ma;
     terminate_mongodb(ctxt);

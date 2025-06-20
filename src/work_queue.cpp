@@ -35,6 +35,7 @@ void *worker_thread(void *arg)
         pthread_mutex_unlock(&queue->mutex);
         task.func(task.arg);
     }
+    return nullptr;
 }
 
 void enqueue_task(work_queue *queue, wq_task task)

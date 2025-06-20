@@ -10,10 +10,8 @@ int main(int argc, char **argv)
         wlog("Failed to initialize cloudwx");
         return -1;
     }
-    raw_metar_entry entry{};
-    while(1) {
-        process_available_audio(ctxt.ma, ctxt.whisper, &entry);
-        mongodb_save_item(ctxt.db, "kpns", entry, nullptr);
+    while (1) {
+        process_available_audio(ctxt.ma, &ctxt.wq);
     }
     ilog("Successfully initialized cloudwx");
     terminate_cloudwx(&ctxt);

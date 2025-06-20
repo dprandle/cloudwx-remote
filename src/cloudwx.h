@@ -2,15 +2,12 @@
 #include "work_queue.h"
 
 struct miniaudio_ctxt;
-struct whisper_context;
-struct whisper_ctxt;
 struct mongodb_ctxt;
 struct raw_metar_entry;
 
 struct cloudwx_ctxt
 {
     miniaudio_ctxt *ma;
-    whisper_ctxt *whisper;
     mongodb_ctxt *db;
     work_queue wq;
 };
