@@ -1,14 +1,11 @@
-#include <malloc.h>
+#include <cstdlib>
 #include <cstring>
 #include <cerrno>
-#include <cmath>
-
 #include <sys/stat.h>
 
 #include "cloudwx.h"
 #include "audio.h"
 #include "mongodb.h"
-#include "miniaudio.h"
 #include "logging.h"
 #include "utils.h"
 
