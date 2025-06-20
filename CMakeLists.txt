@@ -26,16 +26,12 @@ add_executable(${TARGET_NAME} ${SRC_FILES})
 
 target_link_libraries(${TARGET_NAME}
   mongoc_shared
-  pthread
-  whisper)
+  pthread)
 
 if (${CMAKE_HOST_SYSTEM_PROCESSOR} STREQUAL "aarch64")
   target_compile_options(${TARGET_NAME} PRIVATE -march=armv8-a+fp+simd)
 endif()
 
-add_custom_command(
-  TARGET ${TARGET_NAME} POST_BUILD
-  COMMAND cmake -E copy_directory ${CMAKE_SOURCE_DIR}/models ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/models)
 add_custom_command(
   TARGET ${TARGET_NAME} POST_BUILD
   COMMAND cmake -E copy_directory ${CMAKE_SOURCE_DIR}/sample_audio ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/sample_audio)

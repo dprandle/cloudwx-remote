@@ -9,7 +9,6 @@
 #include "audio.h"
 #include "mongodb.h"
 #include "miniaudio.h"
-#include "whisper.h"
 #include "logging.h"
 #include "utils.h"
 
@@ -52,12 +51,6 @@ struct miniaudio_ctxt
     ma_context ctxt;
     ma_device dev;
     audio_buffer data;
-};
-
-struct whisper_ctxt
-{
-    whisper_context *ctxt;
-    f32 *buffer;
 };
 
 intern FILE *open_logging_file()
@@ -333,13 +326,6 @@ intern bool init_audio(miniaudio_ctxt *ma)
     ilog("Allocating %u byte buffer for audio recording", buf_sz);
     ma->data.buffer = (s16 *)malloc(buf_sz);
     return true;
-}
-
-void whisper_log_callback(enum ggml_log_level level, const char *text, void *user_data)
-{
-    if (level >= GGML_LOG_LEVEL_DEBUG && level <= GGML_LOG_LEVEL_CONT) {
-        log_at_level((int)level, false, text);
-    }
 }
 
 intern bool init_mongodb(cloudwx_ctxt *ctxt)

@@ -5,5 +5,3 @@ set(ENABLE_EXAMPLES OFF)
 set(ENABLE_SNAPPY OFF)
 add_subdirectory(mongo-c-driver)
 
-add_subdirectory(whisper.cpp)
-
